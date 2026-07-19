@@ -1,0 +1,96 @@
+// This file is part of www.nand2tetris.org
+// and the book "The Elements of Computing Systems"
+// by Nisan and Schocken, MIT Press.
+// File name: projects/5/CPU.hdl
+/**
+ * The Hack Central Processing unit (CPU).
+ * Parses the binary code in the instruction input and executes it according to the
+ * Hack machine language specification. In the case of a C-instruction, computes the
+ * function specified by the instruction. If the instruction specifies to read a memory
+ * value, the inM input is expected to contain this value. If the instruction specifies
+ * to write a value to the memory, sets the outM output to this value, sets the addressM
+ * output to the target address, and asserts the writeM output (when writeM = 0, any
+ * value may appear in outM).
+ * If the reset input is 0, computes the address of the next instruction and sets the
+ * pc output to that value. If the reset input is 1, sets pc to 0.
+ * Note: The outM and writeM outputs are combinational: they are affected by the
+ * instruction's execution during the current cycle. The addressM and pc outputs are
+ * clocked: although they are affected by the instruction's execution, they commit to
+ * their new values only in the next cycle.
+ */
+CHIP CPU {
+
+    IN  inM[16],         // M value input  (M = contents of RAM[A])
+        instruction[16], // Instruction for execution
+        reset;           // Signals whether to re-start the current
+                         // program (reset==1) or continue executing
+                         // the current program (reset==0).
+
+    OUT outM[16],        // M value output
+        writeM,          // Write to M? 
+        addressM[15],    // Address in data memory (of M)
+        pc[15];          // address of next instruction
+
+    PARTS:
+    // 1. REGISTERS & INPUT SELECTION
+    // A-Register Mux: If bit 15 is 0, it's an A-instruction, so route the raw instruction 
+    // to the A-register. If bit 15 is 1, it's a C-instruction, so route the ALU output.
+    Mux16(a=instruction, b=outALU, sel=instruction[15], out=inA);
+
+    // A-Register Load: We write to A if it's an A-instruction OR if it's a 
+    // C-instruction that explicitly targets the A-register via destination bit 5.
+    Not(in=instruction[15], out=isA);
+    Or(a=isA, b=instruction[5], out=loadA);
+    
+    // We can slice the 15-bit addressM straight out of the A-register's 16-bit 
+    // output bus for free, saving us from using an extra Or16/Mux16 gate later.
+    ARegister(in=inA, load=loadA, out=outA, out[0..14]=addressM);
+
+    // D-Register: Stores the ALU output. We only load it during a C-instruction 
+    // AND if destination bit 4 is asserted.
+    And(a=instruction[15], b=instruction[4], out=loadD);
+    DRegister(in=outALU, load=loadD, out=outD);
+
+    // ALU 'y' input selector: Bit 12 (the 'a' bit) decides whether the ALU 
+    // operates on the A-register value (0) or incoming Memory data (1).
+    Mux16(a=outA, b=inM, sel=instruction[12], out=outAorM);
+
+    // 2. ALU EXECUTION
+    // Feed bits 6 through 11 directly into the ALU control pins.
+    // They perfectly match the Hack specification mapping for c1-c6.
+    ALU(x=outD, y=outAorM, 
+        zx=instruction[11], nx=instruction[10], 
+        zy=instruction[9], ny=instruction[8], 
+        f=instruction[7], no=instruction[6], 
+        out=outALU, out=outM, zr=zr, ng=ng);
+
+    // Memory write-enable: Only write to memory if we are executing a 
+    // C-instruction AND destination bit 3 is high.
+    And(a=instruction[15], b=instruction[3], out=writeM);
+
+    // The ALU tells us if a number is negative (ng) or zero (zr).
+    // We derive 'strictly positive' (> 0) by ensuring it is neither.
+    Not(in=zr, out=notZr);
+    Not(in=ng, out=notNg);
+    And(a=notZr, b=notNg, out=isPos);
+
+    // Match the single ALU condition states against the individual jump bits:
+    // bit 0 (j3) is for >0, bit 1 (j2) is for =0, bit 2 (j1) is for <0.
+    And(a=instruction[0], b=isPos, out=jgt);
+    And(a=instruction[1], b=zr, out=jeq);
+    And(a=instruction[2], b=ng, out=jlt);
+
+    // Pool the three individual match flags. If any of them are true, 
+    // the jump criteria for this instruction has been met.
+    Or(a=jgt, b=jeq, out=jge);
+    Or(a=jge, b=jlt, out=jumpCond);
+    
+    // Safety check: A jump condition is only valid if we are actually 
+    // parsing a C-instruction. A-instructions should never trigger a jump!
+    And(a=instruction[15], b=jumpCond, out=loadPC);
+
+    // Program Counter: Pass the target jump address (always from the A register).
+    // We hardwire inc=true because according to the PC chip specs, the 'load' 
+    // and 'reset' overrides always take precedence over 'inc'.
+    PC(in=outA, load=loadPC, inc=true, reset=reset, out[0..14]=pc);
+}
